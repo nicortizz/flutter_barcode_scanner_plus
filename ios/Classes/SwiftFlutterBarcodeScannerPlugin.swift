@@ -15,8 +15,21 @@ enum ScanMode:Int{
 public class SwiftFlutterBarcodeScannerPlugin: NSObject, FlutterPlugin, ScanBarcodeDelegate,FlutterStreamHandler {
     
     public static var viewController: UIViewController? {
-        let window = UIApplication.shared.delegate?.window ?? nil
-        return window?.rootViewController
+        let delegateWindow = UIApplication.shared.delegate?.window ?? nil
+        if let root = delegateWindow?.rootViewController, root.viewIfLoaded?.window != nil {
+            return root
+        }
+        // Scene-based apps keep their window on the scene, not on the app delegate.
+        if #available(iOS 13.0, *) {
+            let windows = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .flatMap { $0.windows }
+            let sceneWindow = windows.first(where: { $0.isKeyWindow }) ?? windows.first
+            if let root = sceneWindow?.rootViewController {
+                return root
+            }
+        }
+        return delegateWindow?.rootViewController
     }
     public static var lineColor:String=""
     public static var cancelButtonText:String=""
@@ -227,7 +240,7 @@ class BarcodeScannerViewController: UIViewController {
     
     override public func viewDidLoad() {
         super.viewDidLoad()
-        self.isOrientationPortrait = isLandscape
+        self.isOrientationPortrait = currentInterfaceOrientation.isPortrait
         self.initUIComponents()
     }
     
@@ -556,10 +569,18 @@ class BarcodeScannerViewController: UIViewController {
         layer.videoOrientation = orientation
     }
     
-    var isLandscape: Bool {
-        return UIDevice.current.orientation.isValidInterfaceOrientation
-            ? UIDevice.current.orientation.isPortrait
-            : UIApplication.shared.statusBarOrientation.isPortrait
+    /// The layout follows the interface, not the device: UIDevice also reports
+    /// tilts that an orientation-locked app never rotates to.
+    var currentInterfaceOrientation: UIInterfaceOrientation {
+        if #available(iOS 13.0, *) {
+            let window = viewIfLoaded?.window
+                ?? SwiftFlutterBarcodeScannerPlugin.viewController?.viewIfLoaded?.window
+            if let orientation = window?.windowScene?.interfaceOrientation, orientation != .unknown {
+                return orientation
+            }
+        }
+        let bounds = UIScreen.main.bounds
+        return bounds.width <= bounds.height ? .portrait : .landscapeRight
     }
     
     private func launchApp(decodedURL: String) {
@@ -603,21 +624,19 @@ extension BarcodeScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
 extension BarcodeScannerViewController{
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
-        updateUIAfterRotation()
+        // The interface orientation and screen bounds are only final once the transition ends.
+        coordinator.animate(alongsideTransition: nil) { _ in
+            self.updateUIAfterRotation()
+        }
     }
     
     func updateUIAfterRotation(){
         DispatchQueue.main.async {
-            if UIDevice.current.orientation == .portrait || UIDevice.current.orientation == .portraitUpsideDown {
-                self.isOrientationPortrait = true
-            }else{
-                self.isOrientationPortrait = false
-            }
-            //self.isOrientationPortrait = self.isLandscape
-            
+            self.isOrientationPortrait = self.currentInterfaceOrientation.isPortrait
+
             self.screenSize = UIScreen.main.bounds
-            
-            if UIDevice.current.orientation == .portrait || UIDevice.current.orientation == .portraitUpsideDown {
+
+            if self.isOrientationPortrait {
                 self.screenHeight = (CGFloat)((SwiftFlutterBarcodeScannerPlugin.scanMode == ScanMode.QR.index) ? (self.screenSize.width * 0.8) : (self.screenSize.width * 0.5))
                 
             } else {
@@ -648,35 +667,21 @@ extension BarcodeScannerViewController{
     
     // Set video preview orientation
     func setVideoPreviewOrientation(){
-        switch(UIDevice.current.orientation){
-        case .unknown:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-            break
-        case .portrait:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-            break
+        let videoOrientation: AVCaptureVideoOrientation
+        switch currentInterfaceOrientation {
         case .portraitUpsideDown:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portraitUpsideDown
-            break
+            videoOrientation = .portraitUpsideDown
         case .landscapeLeft:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeRight
-            break
+            videoOrientation = .landscapeLeft
         case .landscapeRight:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.landscapeLeft
-            break
-        case .faceUp:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-            break
-        case .faceDown:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-            break
-        @unknown default:
-            self.videoPreviewLayer?.connection?.videoOrientation = AVCaptureVideoOrientation.portrait
-            break
+            videoOrientation = .landscapeRight
+        default:
+            videoOrientation = .portrait
         }
+        self.videoPreviewLayer?.connection?.videoOrientation = videoOrientation
     }
-    
-    
+
+
     /// Remove all subviews from superviews
     func removeAllViews(withCompletion processCompletionCallback: () -> Void){
         for view in self.view.subviews {
